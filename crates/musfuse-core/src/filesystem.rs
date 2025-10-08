@@ -12,7 +12,6 @@ use crate::tag::TagOverlayService;
 pub enum VirtualEntry {
     Directory(PathBuf),
     TrackFile(TrackId),
-    MetadataJson(TrackId),
     CoverImage(TrackId),
 }
 
@@ -74,17 +73,17 @@ impl FileRouter {
     }
 
     pub fn resolve(&self, path: &str) -> Option<VirtualEntry> {
-        if path.ends_with(".json") {
-            self.index
-                .iter()
-                .find(|entry| entry.id.to_string() == path.trim_end_matches(".json"))
-                .map(|entry| VirtualEntry::MetadataJson(entry.id.clone()))
-        } else {
-            self.index
-                .iter()
-                .find(|entry| entry.id.to_string() == path)
-                .map(|entry| VirtualEntry::TrackFile(entry.id.clone()))
+        let path = path.trim_matches('/');
+        if path.is_empty() {
+            return Some(VirtualEntry::Directory(PathBuf::from("/")));
         }
+
+        let candidate = path.strip_suffix(".flac").unwrap_or(path);
+
+        self.index
+            .iter()
+            .find(|entry| entry.id.to_string() == candidate)
+            .map(|entry| VirtualEntry::TrackFile(entry.id.clone()))
     }
 
     pub async fn read_track(&self, id: &TrackId) -> Result<Vec<u8>> {
