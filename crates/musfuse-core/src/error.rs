@@ -14,6 +14,8 @@ pub enum MusFuseError {
     Io(#[from] io::Error),
     #[error("unsupported operation: {0}")]
     Unsupported(&'static str),
+    #[error("media pipeline error: {0}")]
+    Media(String),
 }
 
 pub type Result<T, E = MusFuseError> = std::result::Result<T, E>;

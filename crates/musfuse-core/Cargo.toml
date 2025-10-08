@@ -22,3 +22,4 @@ flac-codec.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 mockall.workspace = true
+hound.workspace = true
