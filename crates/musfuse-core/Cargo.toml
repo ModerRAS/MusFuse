@@ -14,3 +14,11 @@ serde_json.workspace = true
 parking_lot.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+bytes.workspace = true
+sled.workspace = true
+symphonia.workspace = true
+flac-codec.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+mockall.workspace = true
