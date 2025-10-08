@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 
+use crate::adapter::{WinFspAdapter, WinFspHost};
 use musfuse_core::prelude::*;
 
 pub struct WindowsMountProvider<A: PlatformAdapter> {
@@ -18,6 +19,10 @@ impl<A: PlatformAdapter> WindowsMountProvider<A> {
             status: RwLock::new(MountStatus::Unmounted),
             context: RwLock::new(None),
         }
+    }
+
+    pub fn with_adapter(adapter: A) -> Self {
+        Self::new(Arc::new(adapter))
     }
 
     fn transition_to_mounting(&self) -> Result<()> {
@@ -71,6 +76,12 @@ impl<A: PlatformAdapter> WindowsMountProvider<A> {
         self.set_status(MountStatus::Faulted(reason.clone()));
         Self::emit_event(ctx, MountEvent::Fault(reason));
         err
+    }
+}
+
+impl<H: WinFspHost> WindowsMountProvider<WinFspAdapter<H>> {
+    pub fn with_winfsp_host(host: Arc<H>) -> Self {
+        Self::new(Arc::new(WinFspAdapter::new(host)))
     }
 }
 

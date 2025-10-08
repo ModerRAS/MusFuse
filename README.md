@@ -28,10 +28,11 @@ MusFuse 致力于打造跨平台的虚拟音乐文件系统，通过 FUSE/WinFSP
 cargo test -p musfuse-windows
 ```
 
-单元测试围绕 `WindowsMountProvider`，验证以下要点：
+单元测试围绕 `WindowsMountProvider` 与 `WinFspAdapter`，验证以下要点：
 
 - 调用顺序：`prepare_environment` → `mount`。
 - 状态迁移：Mounted / Unmounted / Faulted。
 - 事件通知：通过 `broadcast` 通道分发 `MountEvent`。
+- WinFSP 适配器：`WinFspAdapter` 基于可 mock 的 `WinFspHost` trait，校验安装检测、挂载/卸载调用链。
 
-利用 `mockall` 注入 WinFSP 适配器 Mock，可在纯 Windows 开发环境下快速迭代而无需真正挂载驱动。
+利用 `mockall` 注入 WinFSP Mock Host，可在纯 Windows 开发环境下快速迭代而无需真正挂载驱动。默认的 `WindowsMountProvider::with_winfsp_host(...)` 构造器将自动组装 Adapter 与 Provider。
