@@ -30,6 +30,7 @@
   - 对 cue 分轨进行“虚拟展开”，并在虚拟层实现元数据覆盖而非原文件写入。
   - 所有 Tag/元数据统一抽象，由外部 KV 层持久化与缓存。
   - 提供统一的音频格式策略（有损原样、无损转码为 FLAC）与封面提取。
+  - 对外仅暴露音频/封面等虚拟文件，标签内容随音频容器内嵌或通过挂载接口读写。
 - **非目标**
   - 不在第一阶段处理分布式集群挂载、用户权限隔离、多租户等高级特性。
   - 不负责深度的在线流媒体分发（可后续通过 REST/gRPC 暴露）。
@@ -79,6 +80,8 @@ graph TD
     end
 ```
 
+> 注：写入操作只更新 KV 中的覆盖数据，源音频不会被直接改写，下一次读取时由媒体引擎负责把最新标签同步进音频容器。
+
 ---
 
 ## 核心分层设计
@@ -88,7 +91,7 @@ graph TD
 | VirtualMusicFS | 统一挂载入口，调度平台特定 provider，管理生命周期与健康状况 | CLI 配置、系统钩子 | 虚拟文件系统 mount 点 |
 | Core Filesystem Layer | 解析路径 → 轨道/文件映射，提供读写路由与权限控制 | 虚拟路径请求 | 文件元数据、读写流 | 
 | Media Engine | 解析 cue、读取音频帧、转码、抽取封面 | 真实文件句柄、偏移 | PCM/FLAC 数据流、封面 blob |
-| Metadata Engine | 读取/覆盖 tag，集中缓存与持久化 | TrackId、元数据命令 | JSON 标签、写入确认 |
+| Metadata Engine | 读取/覆盖 tag，集中缓存与持久化 | TrackId、元数据命令 | Tag overlay、封面引用、写入确认 |
 
 ---
 
@@ -101,14 +104,14 @@ graph TD
 | `WinFspProvider` | Windows 下使用 WinFSP SDK 或 `fuse-backend-rs` | 封装 Windows 特有的路径/权限处理 |
 | `DirectoryScanner` | 扫描真实目录，生成目录缓存，监听文件变动 | 支持 lazy scan 与主动刷新，结合 `notify` crate |
 | `TrackMapper` | cue → Track 实体映射，维护轨道索引 | Track 包含 `TrackId`, `offset`, `duration` 等元信息 |
-| `FileRouter` | 根据虚拟路径确定读取策略（原样/分轨/封面/meta） | 对接权限策略、缓存策略 |
+| `FileRouter` | 根据虚拟路径确定读取策略（原样/分轨/封面） | 对接权限策略、缓存策略 |
 | `CueParser` | 使用 `cue-parser` 或自研解析器提取分轨信息 | 结果持久化于 KV，提供 hash 校验 |
 | `AudioReader` | 统一音频读取接口，封装 `symphonia` | 提供 seek/read frame、支持多格式 |
 | `FormatTranscoder` | 将无损格式规范化输出为 FLAC | 支持实时流式转码，结合 ring buffer |
 | `CoverExtractor` | 从文件系统或嵌入数据提取封面 | 可导出 `/Album/cover.jpg` 等虚拟路径 |
 | `TagReader` | 读取原始文件 Tag | 结合 `lofty`，支持多格式 |
 | `TagOverlay` | 合并 KV 层覆盖项与原始 Tag | 优先 KV，fallback 原始 |
-| `MetaCollector` | 统一处理 Tag 查询与更新，对接 `KvStore` | 暴露 `get_tag`, `update_tag`, `list_tracks` 等接口 |
+| `MetaCollector` | 统一处理 Tag 查询与更新，对接 `KvStore` | 提供 `load_overlay`, `apply_delta` 等接口，供媒体流植入标签 |
 | `KvStore` | 提供高性能 KV API，并具备过期策略 | 实现 `KvBackend` trait，可热插拔 |
 
 ---
@@ -129,14 +132,16 @@ sequenceDiagram
     FS->>ROUTE: read("/Album/Track 02.flac")
     ROUTE->>MAP: resolve(track_id)
     MAP-->>ROUTE: TrackInfo(offset,duration)
-    ROUTE->>META: get_tag(track_id)
+    ROUTE->>META: load_overlay(track_id)
     META->>DB: get(track_key)
-    DB-->>META: tag_json/None
-    META-->>ROUTE: merged_tag
-    ROUTE->>AUDIO: stream(track_info)
-    AUDIO-->>ROUTE: FLAC bytes
-    ROUTE-->>FS: data + metadata
+    DB-->>META: overlay_blob/None
+    META-->>ROUTE: merged_tagmap
+    ROUTE->>AUDIO: stream(track_info, merged_tagmap)
+    AUDIO-->>ROUTE: FLAC bytes (embedded tags)
+    ROUTE-->>FS: 音频数据（含标签）
 ```
+
+> 注：虚拟文件系统不会暴露独立的 JSON/文本元数据，`MetaCollector` 返回的 `TagMap` 会在媒体流阶段写入音频容器的标签区。
 
 ### Tag 写入
 
@@ -149,11 +154,13 @@ sequenceDiagram
 
     FS->>ROUTE: write_tag(track_id, payload)
     ROUTE->>META: update_tag(track_id, payload)
-    META->>DB: put(track_key, payload_json)
+    META->>DB: put(track_key, overlay_blob)
     DB-->>META: ack
     META-->>ROUTE: success
     ROUTE-->>FS: ok
 ```
+
+> 注：写入操作只会更新 KV 中的覆盖数据，源音频保持不变；后续读取时由媒体引擎把最新标签写回音频容器或外显接口。
 
 ---
 
@@ -182,18 +189,18 @@ pub trait KvBackend: Send + Sync + 'static {
 ### 键空间规范
 
 ```
-track:{album_hash}:{track_index}:tag      -> JSON tag 数据
+track:{album_hash}:{track_index}:tag      -> TagMap 覆盖数据（serde 序列化）
 track:{album_hash}:{track_index}:cover    -> blob / 引用路径
 album:{album_hash}:cover                  -> blob
 album:{album_hash}:cue                    -> 解析后的结构体（二进制 bincode）
-file:{abs_path_sha1}:stat                 -> JSON（mtime, size, hash）
+file:{abs_path_sha1}:stat                 -> serde 序列化（mtime, size, hash）
 scan:last_run                             -> 时间戳
 policy:{profile_name}                     -> 音频策略配置
 ```
 
 ### 序列化策略
 
-- Tag/配置类：JSON（serde）
+- Tag/配置类：serde 序列化（默认 JSON，可按需切换 bincode 等）
 - 大型二进制：直接存储 `Vec<u8>` 或外链路径（配置可选）
 - Cue 解析缓存：`bincode` + 版本号，便于快速加载
 
@@ -301,9 +308,9 @@ pub struct FileRouter {
 
 impl FileRouter {
     pub async fn open(&self, path: &VirtualPath) -> anyhow::Result<VirtualHandle> {
-        // 1. 解析虚拟路径
-        // 2. 判断类型 (Track/Album/Cover/Meta)
-        // 3. 返回合适的读取器（pass-through 或 虚拟流）
+  // 1. 解析虚拟路径
+  // 2. 判断类型 (Track/Album/Cover)
+  // 3. 返回合适的读取器（pass-through 或 虚拟流）
     }
 }
 ```
