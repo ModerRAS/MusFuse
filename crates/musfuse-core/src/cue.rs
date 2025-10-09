@@ -122,10 +122,9 @@ fn parse_cue(content: &str, base_dir: &Path) -> Result<CueSheet> {
         }
 
         if trimmed.starts_with("INDEX 01") {
-            let timestamp = trimmed
-                .split_whitespace()
-                .last()
-                .ok_or_else(|| crate::error::MusFuseError::Mount("missing index timestamp".into()))?;
+            let timestamp = trimmed.split_whitespace().last().ok_or_else(|| {
+                crate::error::MusFuseError::Mount("missing index timestamp".into())
+            })?;
             if let Some(track) = &mut current_track {
                 track.index_01_frames = timestamp_to_frames(timestamp)?;
             }
@@ -154,11 +153,19 @@ fn extract_quoted(line: &str) -> Option<&str> {
 fn timestamp_to_frames(value: &str) -> Result<u64> {
     let parts: Vec<_> = value.split(':').collect();
     if parts.len() != 3 {
-        return Err(crate::error::MusFuseError::Mount("invalid timestamp".into()));
+        return Err(crate::error::MusFuseError::Mount(
+            "invalid timestamp".into(),
+        ));
     }
-    let minutes: u64 = parts[0].parse().map_err(|_| crate::error::MusFuseError::Mount("invalid minutes".into()))?;
-    let seconds: u64 = parts[1].parse().map_err(|_| crate::error::MusFuseError::Mount("invalid seconds".into()))?;
-    let frames: u64 = parts[2].parse().map_err(|_| crate::error::MusFuseError::Mount("invalid frames".into()))?;
+    let minutes: u64 = parts[0]
+        .parse()
+        .map_err(|_| crate::error::MusFuseError::Mount("invalid minutes".into()))?;
+    let seconds: u64 = parts[1]
+        .parse()
+        .map_err(|_| crate::error::MusFuseError::Mount("invalid seconds".into()))?;
+    let frames: u64 = parts[2]
+        .parse()
+        .map_err(|_| crate::error::MusFuseError::Mount("invalid frames".into()))?;
     Ok(minutes * 60 * 75 + seconds * 75 + frames)
 }
 

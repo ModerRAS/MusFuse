@@ -6,8 +6,8 @@
 | ---- | ---- | ---- |
 | Draft `DefaultFormatTranscoder` API & tests | ✅ 完成 | 依据策略定义接口，编写 WAV 直通与 FLAC 转换测试。 |
 | Implement lossless passthrough & FLAC encode | ✅ 完成 | 使用 `symphonia` 解码 + `flac-codec` 编码，通过现有单元测试。 |
-| Prepare cover extraction pipeline | ☐ 待办 | 规划读取内嵌封面与外部图像。 |
-| Streaming/chunked transcoding optimization | ☐ 待办 | 当前实现单块返回，后续改造为增量式输出。 |
+| Prepare cover extraction pipeline | ✅ 完成 | 内嵌封面优先，外部图像作为回退。 |
+| Streaming/chunked transcoding optimization | ✅ 完成 | 默认 256KiB 块分发，带时间戳元数据。 |
 
 ## 下一步建议
 

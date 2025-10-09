@@ -51,7 +51,12 @@ impl<B: KvBackend> TagPersistence for KvTagPersistence<B> {
 #[async_trait]
 pub trait TagOverlayService: Send + Sync {
     async fn read(&self, track: &TrackId, source: &Path) -> Result<TrackMetadata>;
-    async fn apply(&self, track: &TrackId, source: &Path, delta: &TagDelta) -> Result<TrackMetadata>;
+    async fn apply(
+        &self,
+        track: &TrackId,
+        source: &Path,
+        delta: &TagDelta,
+    ) -> Result<TrackMetadata>;
     async fn remove(&self, track: &TrackId) -> Result<()>;
 }
 
@@ -62,7 +67,10 @@ pub struct TagOverlay<R: TagReader, P: TagPersistence> {
 
 impl<R: TagReader, P: TagPersistence> TagOverlay<R, P> {
     pub fn new(reader: Arc<R>, persistence: Arc<P>) -> Self {
-        Self { reader, persistence }
+        Self {
+            reader,
+            persistence,
+        }
     }
 
     fn apply_delta(meta: &mut TrackMetadata, delta: &TagDelta) {
@@ -89,9 +97,13 @@ where
         Ok(metadata)
     }
 
-    async fn apply(&self, track: &TrackId, source: &Path, delta: &TagDelta) -> Result<TrackMetadata> {
-        let mut merged = self.reader.read_from_file(track, source)
-            .await?;
+    async fn apply(
+        &self,
+        track: &TrackId,
+        source: &Path,
+        delta: &TagDelta,
+    ) -> Result<TrackMetadata> {
+        let mut merged = self.reader.read_from_file(track, source).await?;
         Self::apply_delta(&mut merged, delta);
         self.persistence.save_delta(track, delta).await?;
         Ok(merged)
@@ -105,8 +117,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use mockall::{mock, predicate::always};
+    use std::collections::HashMap;
     use tempfile::tempdir;
 
     use crate::kv::SledBackend;
@@ -162,10 +174,16 @@ mod tests {
             remove: vec![String::from("COMMENT")],
         };
 
-    let merged = overlay.apply(&track_id, Path::new("track.flac"), &delta).await.unwrap();
+        let merged = overlay
+            .apply(&track_id, Path::new("track.flac"), &delta)
+            .await
+            .unwrap();
         assert_eq!(merged.tags.get("RATING"), Some(&TagValue::Number(5)));
 
-    let reloaded = overlay.read(&track_id, Path::new("dummy.flac")).await.unwrap();
+        let reloaded = overlay
+            .read(&track_id, Path::new("dummy.flac"))
+            .await
+            .unwrap();
         assert_eq!(reloaded.tags.get("RATING"), Some(&TagValue::Number(5)));
     }
 }

@@ -68,7 +68,10 @@ impl TrackMapper {
 
                 let metadata = TrackMetadata {
                     id: track_id.clone(),
-                    title: track.title.clone().unwrap_or_else(|| format!("Track {:02}", track.number)),
+                    title: track
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| format!("Track {:02}", track.number)),
                     artist: track
                         .performer
                         .clone()
@@ -137,6 +140,9 @@ mod tests {
         assert_eq!(second.metadata.title, "Song");
         assert_eq!(second.metadata.artist, "Artist");
         assert_eq!(second.source.path, Path::new("/music/disc.flac"));
-        assert_eq!(second.source.cue_path.as_deref(), Some(Path::new("/music/disc.cue")));
+        assert_eq!(
+            second.source.cue_path.as_deref(),
+            Some(Path::new("/music/disc.cue"))
+        );
     }
 }

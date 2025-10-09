@@ -34,7 +34,9 @@ impl<A: PlatformAdapter> WindowsMountProvider<A> {
             }
             MountStatus::Mounting => Err(MusFuseError::Mount("mount already in progress".into())),
             MountStatus::Mounted => Err(MusFuseError::Mount("already mounted".into())),
-            MountStatus::Unmounting => Err(MusFuseError::Mount("unmount currently in progress".into())),
+            MountStatus::Unmounting => {
+                Err(MusFuseError::Mount("unmount currently in progress".into()))
+            }
         }
     }
 
@@ -46,8 +48,12 @@ impl<A: PlatformAdapter> WindowsMountProvider<A> {
                 Ok(())
             }
             MountStatus::Unmounted => Ok(()),
-            MountStatus::Mounting => Err(MusFuseError::Mount("cannot unmount while mounting".into())),
-            MountStatus::Unmounting => Err(MusFuseError::Mount("unmount already in progress".into())),
+            MountStatus::Mounting => {
+                Err(MusFuseError::Mount("cannot unmount while mounting".into()))
+            }
+            MountStatus::Unmounting => {
+                Err(MusFuseError::Mount("unmount already in progress".into()))
+            }
             MountStatus::Faulted(_) => {
                 *status = MountStatus::Unmounting;
                 Ok(())
@@ -185,7 +191,10 @@ mod tests {
         let ctx = Arc::new(MountContext::new(sample_config()));
         let mut rx = ctx.signal.subscribe();
 
-        provider.mount(ctx.clone()).await.expect("mount should succeed");
+        provider
+            .mount(ctx.clone())
+            .await
+            .expect("mount should succeed");
         assert_eq!(provider.status(), MountStatus::Mounted);
 
         let event = rx.recv().await.expect("event expected");

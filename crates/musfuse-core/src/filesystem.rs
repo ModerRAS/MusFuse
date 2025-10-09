@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::error::Result;
 use crate::config::PolicyConfig;
+use crate::error::Result;
 use crate::media::{AudioReader, CoverExtractor, FormatTranscoder, TranscodeRequest};
 use crate::metadata::{TagDelta, TrackId, TrackMetadata};
-use crate::track::TrackIndexEntry;
 use crate::tag::TagOverlayService;
+use crate::track::TrackIndexEntry;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum VirtualEntry {

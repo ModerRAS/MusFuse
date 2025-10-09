@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::error::Result;
 
@@ -60,7 +60,11 @@ pub trait KvBackend: Send + Sync + 'static {
     async fn get(&self, key: &KvKey) -> Result<Option<Vec<u8>>>;
     async fn put(&self, key: &KvKey, value: Vec<u8>) -> Result<()>;
     async fn delete(&self, key: &KvKey) -> Result<()>;
-    async fn scan_prefix(&self, namespace: KvNamespace, prefix: &str) -> Result<Vec<(String, Vec<u8>)>>;
+    async fn scan_prefix(
+        &self,
+        namespace: KvNamespace,
+        prefix: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>>;
 }
 
 pub trait KvCodec: Serialize + DeserializeOwned + Send + Sync + 'static {}
@@ -86,7 +90,8 @@ impl<B: KvBackend> KvStore<B> {
     {
         match self.backend.get(key).await? {
             Some(bytes) => {
-                let value = serde_json::from_slice(&bytes).map_err(|err| crate::error::MusFuseError::Kv(err.to_string()))?;
+                let value = serde_json::from_slice(&bytes)
+                    .map_err(|err| crate::error::MusFuseError::Kv(err.to_string()))?;
                 Ok(Some(value))
             }
             None => Ok(None),
@@ -97,7 +102,8 @@ impl<B: KvBackend> KvStore<B> {
     where
         T: KvCodec,
     {
-        let bytes = serde_json::to_vec(value).map_err(|err| crate::error::MusFuseError::Kv(err.to_string()))?;
+        let bytes = serde_json::to_vec(value)
+            .map_err(|err| crate::error::MusFuseError::Kv(err.to_string()))?;
         self.backend.put(key, bytes).await
     }
 
@@ -117,7 +123,11 @@ impl NamespaceCache {
         }
     }
 
-    fn get_or_insert(&self, db: &sled::Db, namespace: KvNamespace) -> crate::error::Result<sled::Tree> {
+    fn get_or_insert(
+        &self,
+        db: &sled::Db,
+        namespace: KvNamespace,
+    ) -> crate::error::Result<sled::Tree> {
         if let Some(tree) = self.map.lock().get(&namespace).cloned() {
             return Ok(tree);
         }

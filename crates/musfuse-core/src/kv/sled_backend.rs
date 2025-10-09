@@ -42,7 +42,7 @@ impl SledBackend {
 #[async_trait]
 impl KvBackend for SledBackend {
     async fn get(&self, key: &KvKey) -> Result<Option<Vec<u8>>> {
-    let tree = self.tree(key.namespace).await?;
+        let tree = self.tree(key.namespace).await?;
         let key_bytes = key.key.clone();
         spawn_blocking(move || {
             tree.get(key_bytes.as_bytes())
@@ -54,7 +54,7 @@ impl KvBackend for SledBackend {
     }
 
     async fn put(&self, key: &KvKey, value: Vec<u8>) -> Result<()> {
-    let tree = self.tree(key.namespace).await?;
+        let tree = self.tree(key.namespace).await?;
         let key_bytes = key.key.clone();
         spawn_blocking(move || {
             tree.insert(key_bytes.as_bytes(), value)
@@ -66,7 +66,7 @@ impl KvBackend for SledBackend {
     }
 
     async fn delete(&self, key: &KvKey) -> Result<()> {
-    let tree = self.tree(key.namespace).await?;
+        let tree = self.tree(key.namespace).await?;
         let key_bytes = key.key.clone();
         spawn_blocking(move || {
             tree.remove(key_bytes.as_bytes())
@@ -77,8 +77,12 @@ impl KvBackend for SledBackend {
         .map_err(|err| MusFuseError::Kv(format!("task join error: {err}")))?
     }
 
-    async fn scan_prefix(&self, namespace: KvNamespace, prefix: &str) -> Result<Vec<(String, Vec<u8>)>> {
-    let tree = self.tree(namespace).await?;
+    async fn scan_prefix(
+        &self,
+        namespace: KvNamespace,
+        prefix: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        let tree = self.tree(namespace).await?;
         let prefix = prefix.to_owned();
         spawn_blocking(move || {
             let mut results = Vec::new();
@@ -97,7 +101,7 @@ impl KvBackend for SledBackend {
 mod tests {
     use super::*;
     use crate::kv::{KvKey, KvNamespace, KvStore};
-    use crate::metadata::{AlbumId, TrackId, TrackMetadata, TagMap};
+    use crate::metadata::{AlbumId, TagMap, TrackId, TrackMetadata};
 
     fn test_store(path: &Path) -> Result<KvStore<SledBackend>> {
         let backend = SledBackend::open(path)?;

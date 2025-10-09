@@ -78,9 +78,7 @@ mod tests {
     #[tokio::test]
     async fn prepare_environment_calls_host() {
         let mut mock_host = MockHost::new();
-        mock_host
-            .expect_ensure_installed()
-            .return_once(|| Ok(()));
+        mock_host.expect_ensure_installed().return_once(|| Ok(()));
         let adapter = WinFspAdapter::new(Arc::new(mock_host));
         adapter
             .prepare_environment(&sample_config())

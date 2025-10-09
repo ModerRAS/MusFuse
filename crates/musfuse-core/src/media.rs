@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use flac_codec::encode::{FlacSampleWriter, Options};
-use std::fs::File;
-use std::io::Cursor;
+use lofty::{Picture, PictureType, TaggedFileExt, read_from_path};
+use std::fs::{self, File};
+use std::io::{Cursor, ErrorKind, Read};
+use std::path::{Path, PathBuf};
 use tokio::task;
 
 use symphonia::core::audio::SampleBuffer;
@@ -17,6 +19,9 @@ use crate::error::{MusFuseError, Result};
 use crate::metadata::TrackId;
 use crate::policy::AudioFormatPolicy;
 use crate::track::SourceTrack;
+
+const DEFAULT_CHUNK_SIZE: usize = 256 * 1024; // 256 KiB
+const FALLBACK_CHUNK_DURATION_MS: u64 = 200;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioChunk {
@@ -61,6 +66,8 @@ pub trait CoverExtractor: Send + Sync {
 
 pub struct DefaultFormatTranscoder;
 
+pub struct DefaultCoverExtractor;
+
 impl DefaultFormatTranscoder {
     pub fn new() -> Self {
         Self
@@ -88,41 +95,148 @@ impl DefaultFormatTranscoder {
     async fn passthrough(&self, track: &SourceTrack) -> Result<TranscodeResult> {
         let format = Self::extension_of(track);
         let track_clone = track.clone();
-        let data = task::spawn_blocking(move || std::fs::read(track_clone.path))
-            .await
-            .map_err(|err| MusFuseError::Media(err.to_string()))?
-            .map_err(|err| MusFuseError::Media(err.to_string()))?;
+        let sample_rate = track.sample_rate;
+        let channels = track.channels;
+        let chunks = task::spawn_blocking(move || {
+            Self::passthrough_chunks(track_clone.path, sample_rate, channels)
+        })
+        .await
+        .map_err(|err| MusFuseError::Media(err.to_string()))??;
 
         Ok(TranscodeResult {
             track_id: track.id.clone(),
             format,
-            chunks: vec![AudioChunk {
-                data: Bytes::from(data),
-                timestamp_ms: 0,
-                is_end: true,
-            }],
+            chunks,
         })
     }
 
     async fn convert_lossless(&self, track: &SourceTrack) -> Result<TranscodeResult> {
         let track_clone = track.clone();
-        let flac = task::spawn_blocking(move || Self::encode_track_to_flac(&track_clone))
+        let encoded = task::spawn_blocking(move || Self::encode_track_to_flac(&track_clone))
             .await
             .map_err(|err| MusFuseError::Media(err.to_string()))?
             .map_err(|err| MusFuseError::Media(err.to_string()))?;
 
+        let chunks = Self::chunk_bytes(
+            encoded.data,
+            DEFAULT_CHUNK_SIZE,
+            Some(encoded.sample_rate),
+            Some(encoded.channels),
+            Some(encoded.bits_per_sample),
+        );
+
         Ok(TranscodeResult {
             track_id: track.id.clone(),
             format: "flac",
-            chunks: vec![AudioChunk {
-                data: Bytes::from(flac),
-                timestamp_ms: 0,
-                is_end: true,
-            }],
+            chunks,
         })
     }
 
-    fn encode_track_to_flac(track: &SourceTrack) -> Result<Vec<u8>> {
+    fn passthrough_chunks(
+        path: PathBuf,
+        sample_rate: u32,
+        channels: u16,
+    ) -> Result<Vec<AudioChunk>> {
+        let mut file = File::open(&path)?;
+        let mut buffer = vec![0u8; DEFAULT_CHUNK_SIZE];
+        let mut total_bytes: usize = 0;
+        let mut index: usize = 0;
+        let frame_bytes = Self::bytes_per_frame(Some(channels), None);
+        let sample_rate_opt = if sample_rate > 0 {
+            Some(sample_rate)
+        } else {
+            None
+        };
+        let mut chunks = Vec::new();
+
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+
+            let timestamp_ms =
+                Self::offset_to_timestamp(total_bytes, frame_bytes, sample_rate_opt, index);
+            let bytes = Bytes::copy_from_slice(&buffer[..read]);
+            chunks.push(AudioChunk {
+                data: bytes,
+                timestamp_ms,
+                is_end: false,
+            });
+
+            total_bytes += read;
+            index += 1;
+        }
+
+        if let Some(last) = chunks.last_mut() {
+            last.is_end = true;
+        }
+
+        Ok(chunks)
+    }
+
+    fn chunk_bytes(
+        data: Vec<u8>,
+        chunk_size: usize,
+        sample_rate: Option<u32>,
+        channels: Option<u16>,
+        bits_per_sample: Option<u16>,
+    ) -> Vec<AudioChunk> {
+        if data.is_empty() {
+            return vec![];
+        }
+
+        let frame_bytes = Self::bytes_per_frame(channels, bits_per_sample);
+        let mut offset_bytes = 0usize;
+        let mut index = 0usize;
+
+        data.chunks(chunk_size)
+            .map(|chunk| {
+                let timestamp_ms =
+                    Self::offset_to_timestamp(offset_bytes, frame_bytes, sample_rate, index);
+                offset_bytes += chunk.len();
+                index += 1;
+                AudioChunk {
+                    data: Bytes::copy_from_slice(chunk),
+                    timestamp_ms,
+                    is_end: false,
+                }
+            })
+            .enumerate()
+            .map(|(idx, mut chunk)| {
+                let is_last = idx == (data.len() + chunk_size - 1) / chunk_size - 1;
+                if is_last {
+                    chunk.is_end = true;
+                }
+                chunk
+            })
+            .collect()
+    }
+
+    fn bytes_per_frame(channels: Option<u16>, bits_per_sample: Option<u16>) -> Option<usize> {
+        let channels = channels.filter(|c| *c > 0)? as usize;
+        let bits = bits_per_sample.unwrap_or(16).max(8) as usize;
+        let bytes_per_sample = bits / 8;
+        Some(channels * bytes_per_sample.max(1))
+    }
+
+    fn offset_to_timestamp(
+        offset_bytes: usize,
+        frame_bytes: Option<usize>,
+        sample_rate: Option<u32>,
+        chunk_index: usize,
+    ) -> u64 {
+        if let (Some(frame_bytes), Some(sample_rate)) = (frame_bytes, sample_rate) {
+            if frame_bytes > 0 && sample_rate > 0 {
+                let frames = offset_bytes / frame_bytes;
+                return (frames as u64 * 1_000) / sample_rate as u64;
+            }
+        }
+
+        chunk_index as u64 * FALLBACK_CHUNK_DURATION_MS
+    }
+
+    fn encode_track_to_flac(track: &SourceTrack) -> Result<EncodedAudio> {
         let decoded = Self::decode_track(track)?;
         Self::encode_flac(decoded)
     }
@@ -137,7 +251,12 @@ impl DefaultFormatTranscoder {
         }
 
         let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
             .map_err(|err| MusFuseError::Media(err.to_string()))?;
 
         let mut format = probed.format;
@@ -180,7 +299,7 @@ impl DefaultFormatTranscoder {
                 Err(SymphoniaError::IoError(err))
                     if err.kind() == std::io::ErrorKind::UnexpectedEof =>
                 {
-                    break
+                    break;
                 }
                 Err(SymphoniaError::ResetRequired) => {
                     decoder.reset();
@@ -234,7 +353,7 @@ impl DefaultFormatTranscoder {
         })
     }
 
-    fn encode_flac(decoded: DecodedAudio) -> Result<Vec<u8>> {
+    fn encode_flac(decoded: DecodedAudio) -> Result<EncodedAudio> {
         let mut cursor = Cursor::new(Vec::new());
         {
             let mut writer = FlacSampleWriter::new(
@@ -255,7 +374,125 @@ impl DefaultFormatTranscoder {
                 .map_err(|err| MusFuseError::Media(err.to_string()))?;
         }
 
-        Ok(cursor.into_inner())
+        Ok(EncodedAudio {
+            data: cursor.into_inner(),
+            sample_rate: decoded.sample_rate,
+            channels: decoded.channels as u16,
+            bits_per_sample: decoded.bits_per_sample as u16,
+        })
+    }
+}
+
+impl DefaultCoverExtractor {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn extract_sync(path: PathBuf) -> Result<Option<Vec<u8>>> {
+        if let Some(bytes) = Self::extract_embedded(&path)? {
+            return Ok(Some(bytes));
+        }
+        Self::extract_external(&path)
+    }
+
+    fn extract_embedded(path: &Path) -> Result<Option<Vec<u8>>> {
+        let tagged = match read_from_path(path) {
+            Ok(tagged) => tagged,
+            Err(_) => return Ok(None),
+        };
+
+        if let Some(primary) = tagged.primary_tag() {
+            if let Some(bytes) = Self::select_picture(primary.pictures()) {
+                return Ok(Some(bytes));
+            }
+        }
+
+        if let Some(first) = tagged.first_tag() {
+            if let Some(bytes) = Self::select_picture(first.pictures()) {
+                return Ok(Some(bytes));
+            }
+        }
+
+        for tag in tagged.tags() {
+            if let Some(bytes) = Self::select_picture(tag.pictures()) {
+                return Ok(Some(bytes));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn extract_external(path: &Path) -> Result<Option<Vec<u8>>> {
+        let dir = match path.parent() {
+            Some(dir) => dir,
+            None => return Ok(None),
+        };
+
+        for candidate in Self::candidate_paths(dir, path.file_stem()) {
+            match fs::read(&candidate) {
+                Ok(bytes) if !bytes.is_empty() => return Ok(Some(bytes)),
+                Ok(_) => continue,
+                Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                Err(err) => return Err(MusFuseError::Io(err)),
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn candidate_paths(dir: &Path, stem: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+        const CANDIDATES: &[&str] = &[
+            "cover.jpg",
+            "cover.jpeg",
+            "cover.png",
+            "cover.webp",
+            "folder.jpg",
+            "folder.jpeg",
+            "folder.png",
+            "AlbumArtSmall.jpg",
+        ];
+
+        let mut paths: Vec<PathBuf> = CANDIDATES.iter().map(|name| dir.join(name)).collect();
+
+        if let Some(stem) = stem.and_then(|s| s.to_str()) {
+            for ext in &["jpg", "jpeg", "png", "webp"] {
+                paths.push(dir.join(format!("{}.{ext}", stem)));
+            }
+        }
+
+        paths
+    }
+
+    fn select_picture(pictures: &[Picture]) -> Option<Vec<u8>> {
+        let mut front = None;
+        let mut fallback = None;
+
+        for picture in pictures {
+            if picture.data().is_empty() {
+                continue;
+            }
+
+            if picture.pic_type() == PictureType::CoverFront {
+                front = Some(picture.data().to_vec());
+                break;
+            }
+
+            if fallback.is_none() {
+                fallback = Some(picture.data().to_vec());
+            }
+        }
+
+        front.or(fallback)
+    }
+}
+
+#[async_trait]
+impl CoverExtractor for DefaultCoverExtractor {
+    async fn extract(&self, track: &SourceTrack) -> Result<Option<Vec<u8>>> {
+        let path = track.path.clone();
+        task::spawn_blocking(move || Self::extract_sync(path))
+            .await
+            .map_err(|err| MusFuseError::Media(err.to_string()))?
     }
 }
 
@@ -278,10 +515,19 @@ struct DecodedAudio {
     bits_per_sample: u32,
 }
 
+struct EncodedAudio {
+    data: Vec<u8>,
+    sample_rate: u32,
+    channels: u16,
+    bits_per_sample: u16,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::metadata::{AlbumId, TrackId};
+    use std::fs;
+    use std::io::Write;
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -356,5 +602,42 @@ mod tests {
         let data = &result.chunks[0].data;
         assert!(data.starts_with(b"fLaC"));
         assert!(result.chunks[0].is_end);
+    }
+
+    #[test]
+    fn chunk_bytes_splits_data_into_multiple_chunks() {
+        let data = vec![1u8; DEFAULT_CHUNK_SIZE * 2 + 10];
+        let chunks = DefaultFormatTranscoder::chunk_bytes(
+            data,
+            DEFAULT_CHUNK_SIZE,
+            Some(44_100),
+            Some(2),
+            Some(16),
+        );
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks.iter().filter(|chunk| chunk.is_end).count(), 1);
+        assert!(
+            chunks.first().map(|c| c.timestamp_ms).unwrap_or_default()
+                <= chunks.last().map(|c| c.timestamp_ms).unwrap_or_default()
+        );
+    }
+
+    #[tokio::test]
+    async fn cover_extractor_reads_external_cover() {
+        let dir = tempdir().expect("tempdir");
+        let wav_path = dir.path().join("track.wav");
+        write_test_wav(&wav_path);
+
+        let cover_path = dir.path().join("cover.jpg");
+        let mut cover_file = fs::File::create(&cover_path).expect("cover file");
+        cover_file.write_all(&[1u8, 2, 3, 4]).expect("write cover");
+        cover_file.flush().expect("flush cover");
+
+        let extractor = DefaultCoverExtractor::new();
+        let track = make_track(&wav_path);
+        let result = extractor.extract(&track).await.expect("extract");
+
+        assert_eq!(result, Some(vec![1u8, 2, 3, 4]));
     }
 }
