@@ -5,6 +5,7 @@ use lofty::{Picture, PictureType, TaggedFileExt, read_from_path};
 use std::fs::{self, File};
 use std::io::{Cursor, ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::task;
 
 use symphonia::core::audio::SampleBuffer;
@@ -47,6 +48,7 @@ pub struct TranscodeResult {
     pub track_id: TrackId,
     pub format: &'static str,
     pub chunks: Vec<AudioChunk>,
+    pub artwork: Option<Vec<u8>>,
 }
 
 #[async_trait]
@@ -67,6 +69,11 @@ pub trait CoverExtractor: Send + Sync {
 pub struct DefaultFormatTranscoder;
 
 pub struct DefaultCoverExtractor;
+
+pub struct MediaEngine {
+    transcoder: Arc<dyn FormatTranscoder>,
+    cover: Arc<dyn CoverExtractor>,
+}
 
 impl DefaultFormatTranscoder {
     pub fn new() -> Self {
@@ -107,6 +114,7 @@ impl DefaultFormatTranscoder {
             track_id: track.id.clone(),
             format,
             chunks,
+            artwork: None,
         })
     }
 
@@ -129,6 +137,7 @@ impl DefaultFormatTranscoder {
             track_id: track.id.clone(),
             format: "flac",
             chunks,
+            artwork: None,
         })
     }
 
@@ -486,6 +495,30 @@ impl DefaultCoverExtractor {
     }
 }
 
+impl MediaEngine {
+    pub fn new(transcoder: Arc<dyn FormatTranscoder>, cover: Arc<dyn CoverExtractor>) -> Self {
+        Self { transcoder, cover }
+    }
+
+    pub async fn open_stream(
+        &self,
+        track: &SourceTrack,
+        policy: AudioFormatPolicy,
+    ) -> Result<TranscodeResult> {
+        let request = TranscodeRequest {
+            track: track.clone(),
+            policy,
+        };
+
+        let mut result = self.transcoder.transcode(&request).await?;
+        if result.artwork.is_none() {
+            result.artwork = self.cover.extract(track).await?;
+        }
+
+        Ok(result)
+    }
+}
+
 #[async_trait]
 impl CoverExtractor for DefaultCoverExtractor {
     async fn extract(&self, track: &SourceTrack) -> Result<Option<Vec<u8>>> {
@@ -529,9 +562,10 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::Path;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
-    fn write_test_wav(path: &Path) {
+    fn write_test_wav(path: &Path, frames: usize) {
         let spec = hound::WavSpec {
             channels: 2,
             sample_rate: 44_100,
@@ -539,7 +573,7 @@ mod tests {
             sample_format: hound::SampleFormat::Int,
         };
         let mut writer = hound::WavWriter::create(path, spec).expect("create wav");
-        for _ in 0..1_000 {
+        for _ in 0..frames {
             writer.write_sample(0i16).expect("write left");
             writer.write_sample(0i16).expect("write right");
         }
@@ -566,7 +600,7 @@ mod tests {
     async fn passthrough_lossless_returns_original_wav() {
         let dir = tempdir().expect("tempdir");
         let wav_path = dir.path().join("sample.wav");
-        write_test_wav(&wav_path);
+        write_test_wav(&wav_path, 1_000);
 
         let transcoder = DefaultFormatTranscoder::new();
         let request = TranscodeRequest {
@@ -587,7 +621,7 @@ mod tests {
     async fn convert_lossless_outputs_flac() {
         let dir = tempdir().expect("tempdir");
         let wav_path = dir.path().join("sample.wav");
-        write_test_wav(&wav_path);
+        write_test_wav(&wav_path, 1_000);
 
         let transcoder = DefaultFormatTranscoder::new();
         let request = TranscodeRequest {
@@ -627,7 +661,7 @@ mod tests {
     async fn cover_extractor_reads_external_cover() {
         let dir = tempdir().expect("tempdir");
         let wav_path = dir.path().join("track.wav");
-        write_test_wav(&wav_path);
+        write_test_wav(&wav_path, 1_000);
 
         let cover_path = dir.path().join("cover.jpg");
         let mut cover_file = fs::File::create(&cover_path).expect("cover file");
@@ -639,5 +673,47 @@ mod tests {
         let result = extractor.extract(&track).await.expect("extract");
 
         assert_eq!(result, Some(vec![1u8, 2, 3, 4]));
+    }
+
+    #[tokio::test]
+    async fn media_engine_streams_chunks_with_artwork() {
+        let dir = tempdir().expect("tempdir");
+        let wav_path = dir.path().join("stream.wav");
+        let frames = DEFAULT_CHUNK_SIZE / 4 + 2_048;
+        write_test_wav(&wav_path, frames);
+
+        let cover_path = dir.path().join("cover.png");
+        let mut cover_file = fs::File::create(&cover_path).expect("cover file");
+        cover_file.write_all(&[9u8, 8, 7, 6]).expect("write cover");
+        cover_file.flush().expect("flush cover");
+
+        let engine = MediaEngine::new(
+            Arc::new(DefaultFormatTranscoder::new()),
+            Arc::new(DefaultCoverExtractor::new()),
+        );
+
+        let track = make_track(&wav_path);
+        let result = engine
+            .open_stream(&track, AudioFormatPolicy::PassthroughLossless)
+            .await
+            .expect("open stream");
+
+        assert_eq!(result.track_id, track.id);
+        assert_eq!(result.format, "wav");
+        assert!(result.chunks.len() >= 2);
+        assert!(
+            result
+                .chunks
+                .iter()
+                .all(|chunk| chunk.data.len() <= DEFAULT_CHUNK_SIZE)
+        );
+        assert!(
+            result
+                .chunks
+                .windows(2)
+                .all(|pair| pair[0].timestamp_ms <= pair[1].timestamp_ms)
+        );
+        assert!(result.chunks.last().map(|c| c.is_end).unwrap_or(false));
+        assert_eq!(result.artwork, Some(vec![9u8, 8, 7, 6]));
     }
 }

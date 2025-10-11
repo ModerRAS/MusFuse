@@ -14,5 +14,9 @@ pub mod track;
 
 pub use config::*;
 pub use error::*;
+pub use media::{
+    AudioChunk, CoverExtractor, DefaultCoverExtractor, DefaultFormatTranscoder, FormatTranscoder,
+    MediaEngine, TranscodeRequest, TranscodeResult,
+};
 pub use mount::*;
 pub use policy::*;
