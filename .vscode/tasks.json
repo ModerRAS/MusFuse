@@ -25,6 +25,25 @@
 				"status",
 				"-sb"
 			]
+		},
+		{
+			"label": "cargo metadata",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"metadata",
+				"--format-version",
+				"1"
+			]
+		},
+		{
+			"label": "cargo vendor winfsp",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"vendor",
+				"winfsp"
+			]
 		}
 	]
 }
