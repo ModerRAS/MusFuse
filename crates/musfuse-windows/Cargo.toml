@@ -5,6 +5,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "musfuse"
+path = "src/main.rs"
+
 [dependencies]
 musfuse-core = { path = "../musfuse-core" }
 anyhow.workspace = true
@@ -13,9 +17,15 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 parking_lot.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true
 winfsp = "0.12.4"
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+clap = { version = "4", features = ["derive"] }
+tracing-subscriber = "0.3"
 
 [dev-dependencies]
 mockall.workspace = true
+
+[build-dependencies]
+winfsp = { version = "0.12.4", features = ["delayload"] }

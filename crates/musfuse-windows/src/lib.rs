@@ -1,5 +1,5 @@
 pub mod adapter;
 pub mod provider;
 
-pub use adapter::WinFspAdapter;
+pub use adapter::{PassthroughFS, WinFspAdapter, WinFspHostImpl};
 pub use provider::WindowsMountProvider;
